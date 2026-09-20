@@ -1,0 +1,14 @@
+# Python environments and bytecode
+.venv/
+__pycache__/
+*.py[cod]
+
+# PyInstaller build intermediates (the distributable files remain tracked)
+build/
+
+# Editor and operating-system metadata
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
