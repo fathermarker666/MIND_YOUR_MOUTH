@@ -161,7 +161,7 @@ class RecorderApp(tk.Tk):
 
     def _record_done(self, path: Path) -> None:
         self._set_recording_state(False, f"完成：{path}")
-        messagebox.showinfo(APP_TITLE, f"錄音完成：\n{path}")
+        # 成功時只更新狀態列；失敗才以對話框要求使用者確認。
 
     def _record_failed(self, message: str) -> None:
         self._set_recording_state(False, f"錯誤：{message}")

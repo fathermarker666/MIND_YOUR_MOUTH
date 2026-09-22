@@ -49,3 +49,13 @@ py -m venv .venv
 ```
 
 成品會在 `dist\INMP441_Recorder.exe`。原來的根目錄 EXE 不會被覆蓋。
+
+## COM5 異常時先做診斷
+
+先關閉錄音程式與 Arduino 的 Serial Monitor，接著執行：
+
+```powershell
+.\.venv\Scripts\python.exe .\diagnose_esp32.py
+```
+
+預期顯示 `ERROR UNKNOWN_COMMAND` 及「雙向通訊正常」。若顯示「沒有接受寫入」，這是 USB 線、USB 埠、ESP32 重啟狀態或驅動層問題，不是 Python 或 EXE 損毀；拔插資料線、按板子的 EN/Reset，必要時重新上傳韌體。

@@ -144,6 +144,11 @@ def record_wav(
             end_line = _read_line(ser, 3.0)
             if end_line.strip() != b"WAV_END":
                 raise FirmwareError(f"沒有收到正確的 WAV_END：{end_line!r}。")
+    except serial.SerialTimeoutException as exc:
+        raise RecorderError(
+            "序列埠寫入逾時：ESP32 沒有接受指令。請拔插 USB、按 ESP32 的 EN/Reset，"
+            "確認沒有開著 Arduino 序列監控器，並重新燒錄韌體後再試。"
+        ) from exc
     except serial.SerialException as exc:
         raise RecorderError(f"序列埠錯誤：{exc}") from exc
 
