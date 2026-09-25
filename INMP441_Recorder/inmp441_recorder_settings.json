@@ -1,6 +1,6 @@
 {
   "port": "COM5",
-  "seconds": 10,
-  "filename_prefix": "mosback",
-  "output_dir": "C:/MIND_YOUR_MOUTH/INMP441_Recorder/recordings/背景環境音/gain_x4/mosback"
+  "seconds": 1,
+  "filename_prefix": "ESP32 TEST",
+  "output_dir": "C:/MIND_YOUR_MOUTH/INMP441_Recorder/recordings/ESP32除錯"
 }
