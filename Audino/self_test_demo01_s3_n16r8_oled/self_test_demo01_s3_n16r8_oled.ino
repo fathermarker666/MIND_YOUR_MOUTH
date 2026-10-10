@@ -39,6 +39,18 @@ static U8G2_SH1106_128X64_NONAME_F_HW_I2C oled(
 #define SNAPSHOT_GUARD_SAMPLES  I2S_BATCH_SAMPLES
 #define TRAINING_MIC_GAIN       4
 #define BAD_EVENT_THRESHOLD     0.95f
+#define STATUS_LED_PIN          10
+#define ACTIVE_BUZZER_PIN       38
+#define BAD_ALERT_DURATION_MS   1000
+#define BAD_ALERT_COOLDOWN_MS   1500
+
+// OLED-only stabilization. These values do not affect audio capture, the
+// classifier, or its probabilities; they only prevent the visible label from
+// changing on every 250 ms inference.
+#define DISPLAY_CONFIRM_WINDOWS 2
+#define DISPLAY_MIN_HOLD_MS     800
+#define BAD_DISPLAY_LATCH_MS    1500
+#define DISPLAY_LABEL_BUFFER_SIZE 24
 
 static int32_t raw_ring[RING_SAMPLES] = {0};
 static float audio_buffer[TOTAL_SAMPLES] = {0};
@@ -53,6 +65,14 @@ static uint32_t windows_captured = 0;
 
 static bool oled_ready = false;
 static uint8_t oled_address = 0;
+static char displayed_label[DISPLAY_LABEL_BUFFER_SIZE] = "LISTENING";
+static float displayed_confidence = -1.0f;
+static char pending_label[DISPLAY_LABEL_BUFFER_SIZE] = "";
+static uint8_t pending_label_count = 0;
+static uint32_t displayed_since_ms = 0;
+static uint32_t bad_display_until_ms = 0;
+static uint32_t bad_alert_until_ms = 0;
+static uint32_t bad_alert_cooldown_until_ms = 0;
 
 // Exact WAV conversion used by the training recorder and the verified
 // TFLite diagnostic sketch: top 16 bits, gain 4, then signed-16-bit clipping.
@@ -184,6 +204,40 @@ static bool init_oled() {
     return true;
 }
 
+static bool time_before(uint32_t now, uint32_t deadline) {
+    return (int32_t)(now - deadline) < 0;
+}
+
+static void set_bad_alert_outputs(bool enabled) {
+    digitalWrite(STATUS_LED_PIN, enabled ? HIGH : LOW);
+    digitalWrite(ACTIVE_BUZZER_PIN, enabled ? HIGH : LOW);
+}
+
+static void service_bad_alert(uint32_t now) {
+    // This is intentionally non-blocking: audio capture and inference keep
+    // running while the LED and active buzzer are on.
+    set_bad_alert_outputs(time_before(now, bad_alert_until_ms));
+}
+
+static void trigger_bad_alert(uint32_t now) {
+    if (time_before(now, bad_alert_cooldown_until_ms)) return;
+
+    bad_alert_until_ms = now + BAD_ALERT_DURATION_MS;
+    bad_alert_cooldown_until_ms =
+        bad_alert_until_ms + BAD_ALERT_COOLDOWN_MS;
+    set_bad_alert_outputs(true);
+    Serial.println("[ALERT] BAD: LED + active buzzer ON for 1 second.");
+}
+
+static void set_displayed_status(const char *label, float confidence,
+                                 uint32_t now) {
+    snprintf(displayed_label, sizeof(displayed_label), "%s", label);
+    displayed_confidence = confidence;
+    displayed_since_ms = now;
+    pending_label[0] = '\0';
+    pending_label_count = 0;
+}
+
 static void show_classifier_status(const ei_impulse_result_t *result) {
     size_t top_index = 0;
     for (size_t ix = 1; ix < EI_CLASSIFIER_LABEL_COUNT; ix++) {
@@ -195,15 +249,52 @@ static void show_classifier_status(const ei_impulse_result_t *result) {
 
     const char *label = result->classification[top_index].label;
     const float confidence = result->classification[top_index].value;
+    const uint32_t now = millis();
     const bool bad_event = strcmp(label, "BAD") == 0 &&
                            confidence >= BAD_EVENT_THRESHOLD;
-    oled_render(label, confidence, bad_event ? "BAD EVENT >= 0.95" : "RAW STATUS");
+    const char *footer = "STABLE STATUS";
 
-    Serial.printf("[%08lu ms] %s=%.5f (DSP=%lu ms, classify=%lu ms)%s\n",
-                  millis(), label, confidence,
-                  (unsigned long)result->timing.dsp,
-                  (unsigned long)result->timing.classification,
+    // BAD remains immediate. Each qualifying BAD result restarts the
+    // display hold, so a continuing event cannot flicker away.
+    if (bad_event) {
+        bad_display_until_ms = now + BAD_DISPLAY_LATCH_MS;
+        set_displayed_status("BAD", confidence, now);
+        trigger_bad_alert(now);
+        footer = "BAD HOLD 1.5 SEC";
+    } else if (time_before(now, bad_display_until_ms)) {
+        // Keep the last BAD visible for its full hold period.
+        footer = "BAD HOLD 1.5 SEC";
+    } else if (strcmp(label, displayed_label) == 0) {
+        // Same visible state: refresh only the number, never the label.
+        displayed_confidence = confidence;
+        pending_label[0] = '\0';
+        pending_label_count = 0;
+    } else {
+        // A normal label must appear in two consecutive inferences and the
+        // previous visible state must have lasted 0.8 s before OLED changes.
+        if (strcmp(label, pending_label) == 0) {
+            if (pending_label_count < UINT8_MAX) pending_label_count++;
+        } else {
+            snprintf(pending_label, sizeof(pending_label), "%s", label);
+            pending_label_count = 1;
+        }
+
+        if (pending_label_count >= DISPLAY_CONFIRM_WINDOWS &&
+            (uint32_t)(now - displayed_since_ms) >= DISPLAY_MIN_HOLD_MS) {
+            set_displayed_status(label, confidence, now);
+        } else {
+            footer = "STABILIZING";
+        }
+    }
+
+    oled_render(displayed_label, displayed_confidence, footer);
+
+    Serial.printf("[%08lu ms] RAW %s=%.5f | OLED %s=%.5f%s\n",
+                  now, label, confidence, displayed_label, displayed_confidence,
                   bad_event ? "  EVENT: BAD >= 0.95" : "");
+    Serial.printf("           DSP=%lu ms, classify=%lu ms\n",
+                  (unsigned long)result->timing.dsp,
+                  (unsigned long)result->timing.classification);
 }
 
 void setup() {
@@ -212,6 +303,10 @@ void setup() {
     while (!Serial && (millis() - serial_wait_started) < 3000) delay(10);
     Serial.println();
     Serial.println("[BOOT] N16R8 TFLite + OLED status firmware.");
+
+    pinMode(STATUS_LED_PIN, OUTPUT);
+    pinMode(ACTIVE_BUZZER_PIN, OUTPUT);
+    set_bad_alert_outputs(false);
 
     init_oled();
 
@@ -262,10 +357,13 @@ void setup() {
                   TRAINING_MIC_GAIN);
     Serial.printf("[BOOT] I2S: BCLK=%d WS=%d DIN=%d; OLED: SDA=%d SCL=%d\n",
                   I2S_SCK, I2S_WS, I2S_SD, OLED_SDA, OLED_SCL);
-    oled_render("LISTENING", -1.0f, "WAITING FOR 1 SEC WINDOW");
+    set_displayed_status("LISTENING", -1.0f, millis());
+    oled_render(displayed_label, displayed_confidence, "WAITING FOR 1 SEC WINDOW");
 }
 
 void loop() {
+    service_bad_alert(millis());
+
     if (!snapshot_latest_window()) {
         delay(5);
         return;
